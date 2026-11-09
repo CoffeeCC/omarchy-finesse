@@ -1,0 +1,32 @@
+#!/bin/bash
+
+# Add Finesse to the Omarchy app launcher (SUPER + SPACE) as a web app.
+#
+# Usage: finesse-webapp-install [finesse-url]
+#
+# With no argument, the URL is read from the Finesse bar widget's settings in
+# ~/.config/omarchy/shell.json, so configure the widget first.
+
+set -euo pipefail
+
+PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SHELL_JSON="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/shell.json"
+
+url="${1:-}"
+
+if [[ -z $url && -f $SHELL_JSON ]]; then
+  url=$(jq -r '
+    [ .bar.layout // {} | to_entries[] | .value[]?
+      | select(type == "object" and .id == "coffeecc.finesse")
+      | .finesseUrl // empty ] | first // empty
+  ' "$SHELL_JSON" 2>/dev/null || true)
+fi
+
+if [[ -z $url ]]; then
+  echo "finesse-webapp-install: no Finesse URL given and none set in the bar widget." >&2
+  echo "Usage: finesse-webapp-install https://media.example.com/finesse" >&2
+  exit 1
+fi
+
+omarchy-webapp-install "Finesse" "$url" "$PLUGIN_DIR/assets/finesse.png"
+echo "Finesse added to the app launcher ($url)."

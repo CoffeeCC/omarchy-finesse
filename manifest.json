@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "id": "coffeecc.finesse",
+  "name": "Finesse",
+  "version": "0.1.0",
+  "author": "CoffeeCC",
+  "license": "MIT",
+  "description": "Finesse for Jellyfin in the Omarchy bar: Continue Watching at a glance, one click to resume.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Finesse",
+    "description": "Continue Watching from your Jellyfin server. Click a title to resume it in Finesse.",
+    "category": "Media",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "finesseUrl": "",
+      "jellyfinUrl": "",
+      "apiKey": "",
+      "userName": "",
+      "maxItems": 6,
+      "refreshMinutes": 5
+    },
+    "schema": [
+      {
+        "key": "finesseUrl",
+        "type": "string",
+        "label": "Finesse URL",
+        "description": "Where your Finesse client is served, e.g. https://media.example.com/finesse",
+        "defaultValue": ""
+      },
+      {
+        "key": "jellyfinUrl",
+        "type": "string",
+        "label": "Jellyfin URL",
+        "description": "Jellyfin server address. Leave blank to use the Finesse URL's origin.",
+        "defaultValue": ""
+      },
+      {
+        "key": "apiKey",
+        "type": "string",
+        "label": "Jellyfin API key",
+        "description": "Dashboard > API Keys. Stored in plain text in shell.json.",
+        "defaultValue": ""
+      },
+      {
+        "key": "userName",
+        "type": "string",
+        "label": "Jellyfin user",
+        "description": "Whose Continue Watching to show. Blank = first user on the server.",
+        "defaultValue": ""
+      },
+      {
+        "key": "maxItems",
+        "type": "integer",
+        "label": "Items shown",
+        "min": 1,
+        "max": 12,
+        "step": 1,
+        "defaultValue": 6
+      },
+      {
+        "key": "refreshMinutes",
+        "type": "integer",
+        "label": "Refresh interval (minutes)",
+        "min": 1,
+        "max": 120,
+        "step": 1,
+        "defaultValue": 5
+      }
+    ]
+  }
+}
