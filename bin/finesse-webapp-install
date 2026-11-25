@@ -2,31 +2,85 @@
 
 # Add Finesse to the Omarchy app launcher (SUPER + SPACE) as a web app.
 #
-# Usage: finesse-webapp-install [finesse-url]
+# Usage: finesse-webapp-install [--print-only] [finesse-url]
 #
-# With no argument, the URL is read from the Finesse bar widget's settings in
-# ~/.config/omarchy/shell.json, so configure the widget first.
+# With no URL argument, the URL is read from the Finesse bar widget's settings
+# in ~/.config/omarchy/shell.json, so configure the widget first.
 
 set -euo pipefail
 
-PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+if command -v realpath >/dev/null 2>&1; then
+  SCRIPT_PATH="$(realpath "$SCRIPT_PATH")"
+fi
+PLUGIN_DIR="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)"
 SHELL_JSON="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/shell.json"
 
-url="${1:-}"
+print_only=0
+url=""
 
-if [[ -z $url && -f $SHELL_JSON ]]; then
-  url=$(jq -r '
-    [ .bar.layout // {} | to_entries[] | .value[]?
+for arg in "$@"; do
+  case "$arg" in
+    --print-only) print_only=1 ;;
+    -h|--help)
+      echo "Usage: finesse-webapp-install [--print-only] [finesse-url]"
+      exit 0
+      ;;
+    *)
+      if [[ -z "$url" ]]; then
+        url="$arg"
+      fi
+      ;;
+  esac
+done
+
+if [[ -z "$url" && -f "$SHELL_JSON" ]]; then
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "finesse-webapp-install: jq is required to read $SHELL_JSON (or pass the URL directly)." >&2
+    exit 1
+  fi
+  if ! url=$(jq -er '
+    [ .bar.layout // {} | if type == "object" then to_entries[] | .value[]? else empty end
       | select(type == "object" and .id == "coffeecc.finesse")
-      | .finesseUrl // empty ] | first // empty
-  ' "$SHELL_JSON" 2>/dev/null || true)
+      | .finesseUrl // empty ] | .[0] // empty
+  ' "$SHELL_JSON"); then
+    echo "finesse-webapp-install: failed to parse $SHELL_JSON." >&2
+    exit 1
+  fi
 fi
 
-if [[ -z $url ]]; then
+# Trim surrounding whitespace and trailing slashes; match Model.js scheme default.
+url="$(printf '%s' "$url" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's:/*$::')"
+
+if [[ -z "$url" ]]; then
   echo "finesse-webapp-install: no Finesse URL given and none set in the bar widget." >&2
   echo "Usage: finesse-webapp-install https://media.example.com/finesse" >&2
   exit 1
 fi
 
-omarchy-webapp-install "Finesse" "$url" "$PLUGIN_DIR/assets/finesse.png"
+if [[ ! "$url" =~ ^https?:// ]]; then
+  if [[ "$url" =~ ^[a-zA-Z][a-zA-Z0-9+.-]*:([^0-9]|$) ]]; then
+    echo "finesse-webapp-install: unsupported URL scheme in '$url'." >&2
+    exit 1
+  fi
+  url="https://$url"
+fi
+
+if [[ "$print_only" -eq 1 ]]; then
+  printf '%s\n' "$url"
+  exit 0
+fi
+
+ICON_PATH="$PLUGIN_DIR/assets/finesse.png"
+if [[ ! -f "$ICON_PATH" ]]; then
+  echo "finesse-webapp-install: icon not found at $ICON_PATH." >&2
+  exit 1
+fi
+
+if ! command -v omarchy-webapp-install >/dev/null 2>&1; then
+  echo "finesse-webapp-install: omarchy-webapp-install not found in PATH." >&2
+  exit 1
+fi
+
+omarchy-webapp-install "Finesse" "$url" "$ICON_PATH"
 echo "Finesse added to the app launcher ($url)."

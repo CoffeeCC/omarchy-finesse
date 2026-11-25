@@ -12,15 +12,19 @@ Panel {
   property var anchorItem: null
   property var host: null
   property int cursor: 0
+  property string selectedId: ""
 
   readonly property var rows: host ? host.rows : []
   readonly property string status: host ? host.status : "unconfigured"
+  readonly property bool refreshing: host ? host.refreshing === true : false
   readonly property color foreground: Color.popups.text
   readonly property color dim: Qt.darker(foreground, 1.65)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property int smallFont: Style.font.bodySmall
   readonly property int thumbHeight: Style.space(48)
   readonly property int thumbWidth: Math.round(thumbHeight * 16 / 9)
+  readonly property int rowRadius: Math.min(Style.cornerRadius, Style.space(6))
+  readonly property int thumbRadius: Math.min(Style.cornerRadius, Style.space(4))
 
   readonly property string emptyText: {
     if (status === "unconfigured") return "Set your Finesse URL and Jellyfin API key in the widget settings."
@@ -31,6 +35,7 @@ Panel {
 
   function open() {
     cursor = 0
+    selectedId = rows.length > 0 ? rows[0].id : ""
     root.controller.show()
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
@@ -40,9 +45,20 @@ Panel {
     else root.open()
   }
 
+  function selectIndex(idx) {
+    if (rows.length === 0) {
+      cursor = 0
+      selectedId = ""
+      return
+    }
+    var clamped = Math.max(0, Math.min(rows.length - 1, idx))
+    cursor = clamped
+    selectedId = rows[clamped].id
+  }
+
   function moveCursor(delta) {
     if (rows.length === 0) return
-    cursor = Math.max(0, Math.min(rows.length - 1, cursor + delta))
+    selectIndex(cursor + delta)
   }
 
   function activate(index) {
@@ -51,7 +67,22 @@ Panel {
     root.close()
   }
 
-  onRowsChanged: if (cursor >= rows.length) cursor = Math.max(0, rows.length - 1)
+  onRowsChanged: {
+    if (rows.length === 0) {
+      cursor = 0
+      selectedId = ""
+      return
+    }
+    if (selectedId !== "") {
+      for (var i = 0; i < rows.length; i++) {
+        if (rows[i].id === selectedId) {
+          cursor = i
+          return
+        }
+      }
+    }
+    selectIndex(cursor)
+  }
 
   KeyboardPanel {
     id: card
@@ -66,9 +97,20 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      onMoveRequested: function(dx, dy) { root.moveCursor(dy) }
+      onMoveRequested: function(dx, dy) { root.moveCursor(dy !== 0 ? dy : dx) }
       onActivateRequested: root.activate(root.cursor)
       onCloseRequested: root.close()
+
+      Keys.onPressed: function(event) {
+        if (event.key === Qt.Key_R && root.host && root.status !== "unconfigured") {
+          root.host.refresh(true)
+          event.accepted = true
+        } else if (event.key === Qt.Key_O && root.host && root.host.finesseUrl !== "") {
+          root.host.openFinesse()
+          root.close()
+          event.accepted = true
+        }
+      }
 
       Column {
         id: column
@@ -113,10 +155,12 @@ Panel {
 
             width: column.width
             height: root.thumbHeight + Style.space(8)
-            radius: Math.min(Style.cornerRadius, Style.space(6))
+            radius: root.rowRadius
             color: current || hover.containsMouse
-              ? Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.08)
+              ? Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.09)
               : "transparent"
+
+            Behavior on color { ColorAnimation { duration: 120 } }
 
             MouseArea {
               id: hover
@@ -124,7 +168,7 @@ Panel {
               hoverEnabled: true
               acceptedButtons: Qt.LeftButton | Qt.RightButton
               cursorShape: Qt.PointingHandCursor
-              onEntered: root.cursor = rowItem.index
+              onEntered: root.selectIndex(rowItem.index)
               onClicked: function(mouse) {
                 if (mouse.button === Qt.RightButton && root.host) {
                   root.host.details(rowItem.modelData.id)
@@ -141,15 +185,15 @@ Panel {
               anchors.verticalCenter: parent.verticalCenter
               width: root.thumbWidth
               height: root.thumbHeight
-              radius: Math.min(Style.cornerRadius, Style.space(4))
+              radius: root.thumbRadius
               clip: true
               color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06)
 
               SizedImage {
                 anchors.fill: parent
-                url: rowItem.modelData.image
+                url: root.opened ? rowItem.modelData.image : ""
                 crop: true
-                visible: rowItem.modelData.image !== ""
+                visible: root.opened && rowItem.modelData.image !== ""
               }
 
               // Watched-progress strip along the bottom of the thumbnail.
@@ -159,6 +203,7 @@ Panel {
                 height: Math.max(2, Style.space(3))
                 width: parent.width * rowItem.modelData.progress
                 color: Color.accent
+                Behavior on width { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
               }
             }
 
@@ -218,11 +263,12 @@ Panel {
           }
 
           Button {
-            text: "Refresh"
+            text: root.refreshing ? "Refreshing…" : "Refresh"
             foreground: root.foreground
             accent: Color.accent
             visible: root.status !== "unconfigured"
-            onClicked: if (root.host) root.host.refresh()
+            enabled: !root.refreshing
+            onClicked: if (root.host) root.host.refresh(true)
           }
         }
       }

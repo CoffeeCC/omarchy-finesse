@@ -7,6 +7,10 @@ function trimSlash(value) {
   return String(value || "").trim().replace(/\/+$/, "")
 }
 
+function sanitizeApiKey(value) {
+  return String(value || "").replace(/[\r\n]+/g, "").trim()
+}
+
 function withScheme(value) {
   var url = trimSlash(value)
   if (url === "") return ""
@@ -34,10 +38,23 @@ function jellyfinBase(jellyfinSetting, finesseSetting) {
   return originOf(finesseBase(finesseSetting))
 }
 
+// Ordered Jellyfin base URL candidates to probe. Finesse v3 bundles Jellyfin
+// behind /jellyfin on the same origin, while legacy nginx setups put Jellyfin
+// at the origin root. Explicit jellyfinUrl is used as-is.
+function jellyfinCandidates(jellyfinSetting, finesseSetting) {
+  var explicit = withScheme(jellyfinSetting)
+  if (explicit !== "") return [explicit]
+  var finesse = finesseBase(finesseSetting)
+  var origin = originOf(finesse)
+  if (origin === "") return []
+  if (/\/finesse$/i.test(finesse)) return [origin + "/jellyfin", origin]
+  return [origin]
+}
+
 function isConfigured(finesseSetting, jellyfinSetting, apiKey) {
   return finesseBase(finesseSetting) !== ""
     && jellyfinBase(jellyfinSetting, finesseSetting) !== ""
-    && String(apiKey || "").trim() !== ""
+    && sanitizeApiKey(apiKey) !== ""
 }
 
 function playUrl(finesseSetting, itemId) {
@@ -75,7 +92,7 @@ function pickUserId(raw, userName) {
   var i
   if (want !== "") {
     for (i = 0; i < users.length; i++) {
-      if (users[i] && String(users[i].Name || "").toLowerCase() === want) return String(users[i].Id || "")
+      if (users[i] && users[i].Id && String(users[i].Name || "").trim().toLowerCase() === want) return String(users[i].Id)
     }
     return ""
   }
@@ -91,28 +108,39 @@ function pad2(n) {
 }
 
 function episodeCode(item) {
-  if (item.ParentIndexNumber === undefined || item.IndexNumber === undefined) return ""
-  return "S" + pad2(item.ParentIndexNumber) + "E" + pad2(item.IndexNumber)
+  var s = Number(item.ParentIndexNumber)
+  var e = Number(item.IndexNumber)
+  if (item.ParentIndexNumber === undefined || item.ParentIndexNumber === null
+      || item.IndexNumber === undefined || item.IndexNumber === null) return ""
+  if (!Number.isFinite(s) || !Number.isFinite(e) || s < 0 || e < 0) return ""
+  return "S" + pad2(Math.floor(s)) + "E" + pad2(Math.floor(e))
 }
 
 function formatRemaining(ticksLeft) {
-  var minutes = Math.round(Number(ticksLeft || 0) / 600000000)
-  if (!(minutes > 0)) return ""
+  var ticks = Number(ticksLeft || 0)
+  if (!Number.isFinite(ticks) || ticks <= 0) return ""
+  var minutes = Math.round(ticks / 600000000)
+  if (minutes <= 0) return "<1m left"
   if (minutes < 60) return minutes + "m left"
   var h = Math.floor(minutes / 60)
   var m = minutes % 60
   return h + "h" + (m > 0 ? " " + m + "m" : "") + " left"
 }
 
+function imgPath(jfBase, itemId, kind, tag) {
+  return jfBase + "/Items/" + encodeURIComponent(String(itemId))
+    + "/Images/" + kind + "?fillHeight=96&quality=85&tag=" + encodeURIComponent(String(tag))
+}
+
 // 16:9 art for the row thumbnail: episode still / thumb / backdrop / poster.
 function thumbUrl(jfBase, item) {
   var tags = item.ImageTags || {}
-  if (tags.Thumb) return jfBase + "/Items/" + item.Id + "/Images/Thumb?fillHeight=96&quality=85&tag=" + tags.Thumb
-  if (item.Type === "Episode" && tags.Primary) return jfBase + "/Items/" + item.Id + "/Images/Primary?fillHeight=96&quality=85&tag=" + tags.Primary
-  if (item.ParentThumbItemId && item.ParentThumbImageTag) return jfBase + "/Items/" + item.ParentThumbItemId + "/Images/Thumb?fillHeight=96&quality=85&tag=" + item.ParentThumbImageTag
-  if (item.BackdropImageTags && item.BackdropImageTags.length > 0) return jfBase + "/Items/" + item.Id + "/Images/Backdrop?fillHeight=96&quality=85&tag=" + item.BackdropImageTags[0]
-  if (item.ParentBackdropItemId && item.ParentBackdropImageTags && item.ParentBackdropImageTags.length > 0) return jfBase + "/Items/" + item.ParentBackdropItemId + "/Images/Backdrop?fillHeight=96&quality=85&tag=" + item.ParentBackdropImageTags[0]
-  if (tags.Primary) return jfBase + "/Items/" + item.Id + "/Images/Primary?fillHeight=96&quality=85&tag=" + tags.Primary
+  if (tags.Thumb) return imgPath(jfBase, item.Id, "Thumb", tags.Thumb)
+  if (item.Type === "Episode" && tags.Primary) return imgPath(jfBase, item.Id, "Primary", tags.Primary)
+  if (item.ParentThumbItemId && item.ParentThumbImageTag) return imgPath(jfBase, item.ParentThumbItemId, "Thumb", item.ParentThumbImageTag)
+  if (item.BackdropImageTags && item.BackdropImageTags.length > 0) return imgPath(jfBase, item.Id, "Backdrop", item.BackdropImageTags[0])
+  if (item.ParentBackdropItemId && item.ParentBackdropImageTags && item.ParentBackdropImageTags.length > 0) return imgPath(jfBase, item.ParentBackdropItemId, "Backdrop", item.ParentBackdropImageTags[0])
+  if (tags.Primary) return imgPath(jfBase, item.Id, "Primary", tags.Primary)
   return ""
 }
 
@@ -130,7 +158,13 @@ function parseResume(raw, jfBase) {
     var data = it.UserData || {}
     var total = Number(it.RunTimeTicks || 0)
     var pos = Number(data.PlaybackPositionTicks || 0)
-    var pct = total > 0 ? Math.max(0, Math.min(1, pos / total)) : Math.max(0, Math.min(1, Number(data.PlayedPercentage || 0) / 100))
+    if (!Number.isFinite(total) || total < 0) total = 0
+    if (!Number.isFinite(pos) || pos < 0) pos = 0
+    var fallbackPct = Number(data.PlayedPercentage || 0)
+    if (!Number.isFinite(fallbackPct)) fallbackPct = 0
+    var pct = total > 0
+      ? Math.max(0, Math.min(1, pos / total))
+      : Math.max(0, Math.min(1, fallbackPct / 100))
     var isEpisode = it.Type === "Episode"
     var code = isEpisode ? episodeCode(it) : ""
     rows.push({
@@ -145,4 +179,25 @@ function parseResume(raw, jfBase) {
     })
   }
   return rows
+}
+
+function rowsEqual(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false
+  for (var i = 0; i < a.length; i++) {
+    var x = a[i], y = b[i]
+    if (x.id !== y.id || x.title !== y.title || x.subtitle !== y.subtitle
+        || x.progress !== y.progress || x.remaining !== y.remaining || x.image !== y.image) {
+      return false
+    }
+  }
+  return true
+}
+
+function httpErrorText(status) {
+  var code = Number(status || 0)
+  if (code === 401 || code === 403) return "Jellyfin rejected the API key — check your widget settings."
+  if (code === 404) return "Jellyfin API not found — check your Jellyfin URL."
+  if (code >= 500) return "Jellyfin returned an error (HTTP " + code + ")."
+  if (code > 0) return "Unexpected response from Jellyfin (HTTP " + code + ")."
+  return "Can't reach Jellyfin — check your connection and server URL."
 }

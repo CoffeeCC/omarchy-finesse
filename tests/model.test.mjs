@@ -2,22 +2,49 @@
 // Usage: node --test tests/*.test.mjs
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import vm from 'node:vm'
 
-const src = readFileSync(new URL('../Model.js', import.meta.url), 'utf8').replace(/^\.pragma library\s*$/m, '')
+const rawSrc = readFileSync(new URL('../Model.js', import.meta.url), 'utf8')
+assert.match(rawSrc, /^\.pragma library\s*$/m, 'Model.js must declare .pragma library')
+const src = rawSrc.replace(/^\.pragma library\s*$/m, '')
 const M = {}
 vm.runInNewContext(src, M)
 
 test('urls: scheme, trailing slash, jellyfin fallback to finesse origin', () => {
   assert.equal(M.finesseBase('media.example.com/finesse/'), 'https://media.example.com/finesse')
+  assert.equal(M.finesseBase('HTTP://media.example.com/finesse///'), 'HTTP://media.example.com/finesse')
   assert.equal(M.finesseBase('javascript:alert(1)'), '')
   assert.equal(M.finesseBase('file:///etc/passwd'), '')
+  assert.equal(M.finesseBase('ftp://media.lan'), '')
   assert.equal(M.finesseBase('media.lan:8096'), 'https://media.lan:8096')
   assert.equal(M.jellyfinBase('', 'https://h.ts.net:10000/finesse'), 'https://h.ts.net:10000')
   assert.equal(M.jellyfinBase('http://192.168.8.120:8096/', 'x'), 'http://192.168.8.120:8096')
+  assert.equal(M.jellyfinBase('', ''), '')
   assert.equal(M.playUrl('https://h/finesse', 'abc'), 'https://h/finesse/play/abc')
+  assert.equal(M.playUrl('https://h/finesse', 'a/b?c'), 'https://h/finesse/play/a%2Fb%3Fc')
   assert.equal(M.itemUrl('', 'abc'), '')
+})
+
+test('jellyfinCandidates: prefers Finesse v3 /jellyfin then legacy origin root', () => {
+  assert.deepEqual(
+    [...M.jellyfinCandidates('', 'https://nas.ts.net:8080/finesse/')],
+    ['https://nas.ts.net:8080/jellyfin', 'https://nas.ts.net:8080'],
+  )
+  assert.deepEqual(
+    [...M.jellyfinCandidates('http://192.168.1.5:8096/', 'https://nas.ts.net/finesse')],
+    ['http://192.168.1.5:8096'],
+  )
+  assert.deepEqual([...M.jellyfinCandidates('', 'https://media.example.com')], ['https://media.example.com'])
+  assert.deepEqual([...M.jellyfinCandidates('', '')], [])
+})
+
+test('sanitizeApiKey strips control newlines and whitespace', () => {
+  assert.equal(M.sanitizeApiKey('  abc\r\nX-Injected: 1 '), 'abcX-Injected: 1')
+  assert.equal(M.sanitizeApiKey('\r\n  '), '')
 })
 
 test('isConfigured needs finesse url and key', () => {
@@ -26,9 +53,11 @@ test('isConfigured needs finesse url and key', () => {
   assert.equal(M.isConfigured('', 'https://jf', 'k'), false)
 })
 
-test('resumeUrl clamps limit', () => {
+test('resumeUrl clamps limit and encodes userId', () => {
   assert.match(M.resumeUrl('https://jf', 'u1', 99), /\/Users\/u1\/Items\/Resume\?Limit=24&/)
+  assert.match(M.resumeUrl('https://jf', 'u1', -5), /Limit=1&/)
   assert.match(M.resumeUrl('https://jf', 'u1', 'x'), /Limit=6&/)
+  assert.match(M.resumeUrl('https://jf', 'a/b#c', 6), /\/Users\/a%2Fb%23c\/Items\/Resume\?/)
 })
 
 test('pickUserId by name, else first enabled', () => {
@@ -36,13 +65,14 @@ test('pickUserId by name, else first enabled', () => {
     { Id: 'a', Name: 'Admin', Policy: { IsDisabled: true } },
     { Id: 'b', Name: 'Paul' },
   ])
-  assert.equal(M.pickUserId(users, 'paul'), 'b')
+  assert.equal(M.pickUserId(users, ' paul '), 'b')
   assert.equal(M.pickUserId(users, 'nobody'), '')
   assert.equal(M.pickUserId(users, ''), 'b')
+  assert.equal(M.pickUserId('[]', ''), '')
   assert.equal(M.pickUserId('not json', ''), '')
 })
 
-test('parseResume shapes episodes and movies', () => {
+test('parseResume shapes episodes, movies, encoding, and edge cases', () => {
   const raw = JSON.stringify({
     Items: [
       {
@@ -53,11 +83,19 @@ test('parseResume shapes episodes and movies', () => {
         Id: 'm1', Type: 'Movie', Name: 'Film', ProductionYear: 1999, RunTimeTicks: 72000000000,
         UserData: { PlaybackPositionTicks: 0 }, ImageTags: { Primary: 'p' }, BackdropImageTags: ['bd'],
       },
+      {
+        Id: 'e2/bad', Type: 'Episode', Name: 'Finale', SeriesName: 'Show', ParentIndexNumber: 10, IndexNumber: 12,
+        RunTimeTicks: 600000000, UserData: { PlaybackPositionTicks: 590000000 }, ImageTags: { Thumb: 'x&y=1' },
+      },
+      {
+        Id: 'm2', Type: 'Movie', Name: 'FallbackPct', RunTimeTicks: 0,
+        UserData: { PlayedPercentage: 'not-a-number' },
+      },
       { Name: 'no id' },
     ],
   })
   const rows = M.parseResume(raw, 'https://jf')
-  assert.equal(rows.length, 2)
+  assert.equal(rows.length, 4)
   assert.equal(rows[0].title, 'Show')
   assert.equal(rows[0].subtitle, 'S01E02 · Pilot')
   assert.equal(rows[0].progress, 0.25)
@@ -66,5 +104,52 @@ test('parseResume shapes episodes and movies', () => {
   assert.equal(rows[1].subtitle, '1999')
   assert.equal(rows[1].remaining, '2h left')
   assert.match(rows[1].image, /Images\/Backdrop\?.*tag=bd$/)
+  assert.equal(rows[2].subtitle, 'S10E12 · Finale')
+  assert.equal(rows[2].remaining, '<1m left')
+  assert.equal(rows[2].image, 'https://jf/Items/e2%2Fbad/Images/Thumb?fillHeight=96&quality=85&tag=x%26y%3D1')
+  assert.equal(rows[3].progress, 0)
+  assert.equal(Number.isNaN(rows[3].progress), false)
+  assert.equal(rows[3].image, '')
   assert.equal(M.parseResume('{"error":1}', 'x'), null)
+  assert.equal(M.parseResume('{"Items":null}', 'x'), null)
+})
+
+test('rowsEqual detects identical vs changed rows', () => {
+  const a = [{ id: '1', title: 'A', subtitle: '', progress: 0.5, remaining: '10m left', image: 'u' }]
+  const b = [{ id: '1', title: 'A', subtitle: '', progress: 0.5, remaining: '10m left', image: 'u' }]
+  const c = [{ id: '1', title: 'A', subtitle: '', progress: 0.6, remaining: '8m left', image: 'u' }]
+  assert.equal(M.rowsEqual(a, b), true)
+  assert.equal(M.rowsEqual(a, c), false)
+})
+
+test('httpErrorText maps common status codes', () => {
+  assert.match(M.httpErrorText(401), /API key/i)
+  assert.match(M.httpErrorText(404), /not found/i)
+  assert.match(M.httpErrorText(502), /502/)
+  assert.match(M.httpErrorText(0), /Can't reach/)
+})
+
+test('bin/finesse-webapp-install reads shell.json and normalizes URL with --print-only', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'omarchy-finesse-test-'))
+  try {
+    mkdirSync(join(dir, 'omarchy'), { recursive: true })
+    writeFileSync(
+      join(dir, 'omarchy', 'shell.json'),
+      JSON.stringify({
+        bar: {
+          layout: {
+            right: [{ id: 'coffeecc.finesse', finesseUrl: ' media.lan:8080/finesse/ ' }],
+          },
+        },
+      }),
+    )
+    const script = new URL('../bin/finesse-webapp-install', import.meta.url).pathname
+    const out = execFileSync('bash', [script, '--print-only'], {
+      env: { ...process.env, XDG_CONFIG_HOME: dir },
+      encoding: 'utf8',
+    }).trim()
+    assert.equal(out, 'https://media.lan:8080/finesse')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
